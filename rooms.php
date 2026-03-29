@@ -1,253 +1,275 @@
 <?php
-$pageTitle = 'Rooms';
-require_once 'includes/db.php';
+$pageTitle = 'Manage Rooms';
+require_once 'admin_header.php';
+require_once '../includes/db.php';
 
-$hotel_id = isset($_GET['hotel_id']) ? (int)$_GET['hotel_id'] : 0;
+$msg = '';
+$msgType = 'success';
+$editRoom = null;
 
-if (!$hotel_id) {
-    header('Location: hotels.php');
-    exit();
+$filterHotel = isset($_GET['hotel_id']) ? (int)$_GET['hotel_id'] : 0;
+
+// --- DELETE ---
+if (isset($_GET['delete'])) {
+    $delId = (int)$_GET['delete'];
+    $stmt = $pdo->prepare("SELECT image FROM rooms WHERE id=?");
+    $stmt->execute([$delId]);
+    $old = $stmt->fetch();
+    if ($old && $old['image'] && $old['image'] !== 'default_room.jpg') {
+        @unlink('../uploads/rooms/' . $old['image']);
+    }
+    $pdo->prepare("DELETE FROM rooms WHERE id=?")->execute([$delId]);
+    $msg = 'Room deleted successfully.';
 }
 
-// Fetch hotel
-$stmt = $pdo->prepare("SELECT * FROM hotels WHERE id = ?");
-$stmt->execute([$hotel_id]);
-$hotel = $stmt->fetch();
-
-if (!$hotel) {
-    header('Location: hotels.php');
-    exit();
+// --- EDIT FETCH ---
+if (isset($_GET['edit'])) {
+    $stmt = $pdo->prepare("SELECT * FROM rooms WHERE id=?");
+    $stmt->execute([(int)$_GET['edit']]);
+    $editRoom = $stmt->fetch();
 }
 
-// Availability check
-$checkIn  = isset($_GET['check_in'])  ? $_GET['check_in']  : '';
-$checkOut = isset($_GET['check_out']) ? $_GET['check_out'] : '';
+// --- ADD / UPDATE ---
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $hotel_id    = (int)($_POST['hotel_id']   ?? 0);
+    $room_type   = trim($_POST['room_type']   ?? '');
+    $price       = (float)($_POST['price']    ?? 0);
+    $description = trim($_POST['description'] ?? '');
+    $status      = $_POST['status'] === 'Available' ? 'Available' : 'Unavailable';
+    $id          = (int)($_POST['room_id']    ?? 0);
 
-// Filters
-$typeFilter  = isset($_GET['room_type'])  ? $_GET['room_type']  : 'all';
-$priceFilter = isset($_GET['price_range']) ? $_GET['price_range'] : 'all';
+    if (!$hotel_id || !$room_type || $price <= 0) {
+        $msg = 'Hotel, room type, and price are required.';
+        $msgType = 'danger';
+    } else {
+        $imageName = $_POST['existing_image'] ?? 'default_room.jpg';
+        if (!empty($_FILES['image']['name'])) {
+            $ext = strtolower(pathinfo($_FILES['image']['name'], PATHINFO_EXTENSION));
+            if (in_array($ext, ['jpg','jpeg','png','gif','webp'])) {
+                $newName = 'room_' . time() . '_' . rand(1000,9999) . '.' . $ext;
+                $uploadDir = '../uploads/rooms/';
+                if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
+                if (move_uploaded_file($_FILES['image']['tmp_name'], $uploadDir . $newName)) {
+                    if ($imageName && $imageName !== 'default_room.jpg') {
+                        @unlink($uploadDir . $imageName);
+                    }
+                    $imageName = $newName;
+                } else {
+                    $msg = 'Image upload failed.';
+                    $msgType = 'danger';
+                }
+            } else {
+                $msg = 'Invalid image format.';
+                $msgType = 'danger';
+            }
+        }
 
-// Fetch rooms
-$query = "SELECT * FROM rooms WHERE hotel_id = :hotel_id";
-$params = ['hotel_id' => $hotel_id];
-
-if ($typeFilter !== 'all') {
-    $query .= " AND room_type LIKE :rtype";
-    $params['rtype'] = "%$typeFilter%";
-}
-
-if ($priceFilter !== 'all') {
-    list($minP, $maxP) = explode('-', $priceFilter . '-9999999');
-    $query .= " AND price >= :minp";
-    $params['minp'] = (float)$minP;
-    if ($maxP && $maxP !== '9999999') {
-        $query .= " AND price <= :maxp";
-        $params['maxp'] = (float)$maxP;
+        if (!$msg) {
+            if ($id) {
+                $pdo->prepare("UPDATE rooms SET hotel_id=?, room_type=?, price=?, description=?, image=?, status=? WHERE id=?")
+                    ->execute([$hotel_id, $room_type, $price, $description, $imageName, $status, $id]);
+                $msg = 'Room updated successfully!';
+            } else {
+                $pdo->prepare("INSERT INTO rooms (hotel_id, room_type, price, description, image, status) VALUES (?,?,?,?,?,?)")
+                    ->execute([$hotel_id, $room_type, $price, $description, $imageName, $status]);
+                $msg = 'Room added successfully!';
+            }
+            header('Location: rooms.php?msg=' . urlencode($msg) . ($filterHotel ? '&hotel_id='.$filterHotel : ''));
+            exit();
+        }
     }
 }
 
-$query .= " ORDER BY price ASC";
-$stmt = $pdo->prepare($query);
-$stmt->execute($params);
-$rooms = $stmt->fetchAll();
+if (isset($_GET['msg'])) { $msg = $_GET['msg']; }
 
-// If availability dates set, filter out booked rooms
-$bookedRoomIds = [];
-if ($checkIn && $checkOut) {
-    $bStmt = $pdo->prepare("
-        SELECT DISTINCT room_id FROM reservations
-        WHERE status != 'Cancelled'
-          AND check_in < :check_out
-          AND check_out > :check_in
-    ");
-    $bStmt->execute(['check_in' => $checkIn, 'check_out' => $checkOut]);
-    $bookedRoomIds = array_column($bStmt->fetchAll(), 'room_id');
+// Fetch hotels for dropdown
+$hotels = $pdo->query("SELECT id, hotel_name FROM hotels ORDER BY hotel_name")->fetchAll();
+
+// Fetch rooms
+if ($filterHotel) {
+    $stmt = $pdo->prepare("SELECT r.*, h.hotel_name FROM rooms r JOIN hotels h ON r.hotel_id=h.id WHERE r.hotel_id=? ORDER BY h.hotel_name, r.price");
+    $stmt->execute([$filterHotel]);
+} else {
+    $stmt = $pdo->query("SELECT r.*, h.hotel_name FROM rooms r JOIN hotels h ON r.hotel_id=h.id ORDER BY h.hotel_name, r.price");
 }
-
-// Room types for filter
-$rtStmt = $pdo->prepare("SELECT DISTINCT room_type FROM rooms WHERE hotel_id = ?");
-$rtStmt->execute([$hotel_id]);
-$roomTypes = array_column($rtStmt->fetchAll(), 'room_type');
-
-require_once 'includes/header.php';
+$rooms = $stmt->fetchAll();
 ?>
 
-<div class="page-header">
-  <div class="container">
-    <nav aria-label="breadcrumb">
-      <ol class="breadcrumb mb-2">
-        <li class="breadcrumb-item"><a href="index.php">Home</a></li>
-        <li class="breadcrumb-item"><a href="hotels.php">Hotels</a></li>
-        <li class="breadcrumb-item active"><?= htmlspecialchars($hotel['hotel_name']) ?></li>
-      </ol>
-    </nav>
-    <h1><i class="fas fa-door-open me-2"></i><?= htmlspecialchars($hotel['hotel_name']) ?></h1>
-    <p style="color:rgba(255,255,255,0.75);margin:0;">
-      <i class="fas fa-map-marker-alt me-1"></i><?= htmlspecialchars($hotel['location']) ?>
-    </p>
-  </div>
+<?php if ($msg): ?>
+<div class="alert alert-<?= $msgType ?> alert-dismissible fade show auto-dismiss mb-4">
+  <i class="fas fa-<?= $msgType==='success'?'check-circle':'exclamation-circle' ?> me-2"></i>
+  <?= htmlspecialchars($msg) ?>
+  <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
 </div>
+<?php endif; ?>
 
-<div class="container py-5">
+<div class="row g-4">
 
-  <!-- Hotel Info Banner -->
-  <div class="hotel-info-banner">
-    <div class="row align-items-center">
-      <div class="col-md-8">
-        <h2><?= htmlspecialchars($hotel['hotel_name']) ?></h2>
-        <p class="location-text"><i class="fas fa-map-marker-alt me-1"></i><?= htmlspecialchars($hotel['location']) ?></p>
-        <p style="color:rgba(255,255,255,0.8);margin:0;"><?= htmlspecialchars($hotel['description']) ?></p>
+  <!-- ADD / EDIT FORM -->
+  <div class="col-lg-4">
+    <div class="admin-card">
+      <div class="admin-card-header">
+        <h5><i class="fas fa-<?= $editRoom ? 'edit' : 'plus-circle' ?> me-2 text-accent"></i>
+          <?= $editRoom ? 'Edit Room' : 'Add New Room' ?>
+        </h5>
+        <?php if ($editRoom): ?>
+        <a href="rooms.php" class="btn-sm-action btn-view">Cancel</a>
+        <?php endif; ?>
       </div>
-      <div class="col-md-4 text-md-end mt-3 mt-md-0">
-        <a href="hotels.php" class="btn-outline-custom" style="color:white;border-color:rgba(255,255,255,0.5)">
-          <i class="fas fa-arrow-left me-1"></i>Back to Hotels
-        </a>
-      </div>
-    </div>
-  </div>
-
-  <!-- Availability Checker -->
-  <div class="avail-checker">
-    <h5 class="mb-3" style="color:var(--primary)">
-      <i class="fas fa-calendar-check me-2 text-accent"></i>Check Room Availability
-    </h5>
-    <form method="GET" action="rooms.php">
-      <input type="hidden" name="hotel_id" value="<?= $hotel_id ?>">
-      <div class="row g-3 align-items-end">
-        <div class="col-md-3">
-          <label class="form-label">Check-in Date</label>
-          <input type="date" class="form-control" name="check_in"
-            value="<?= htmlspecialchars($checkIn) ?>"
-            min="<?= date('Y-m-d') ?>">
-        </div>
-        <div class="col-md-3">
-          <label class="form-label">Check-out Date</label>
-          <input type="date" class="form-control" name="check_out"
-            value="<?= htmlspecialchars($checkOut) ?>"
-            min="<?= date('Y-m-d') ?>">
-        </div>
-        <div class="col-md-2">
-          <label class="form-label">Room Type</label>
-          <select class="form-select" name="room_type">
-            <option value="all">All Types</option>
-            <?php foreach ($roomTypes as $rt): ?>
-            <option value="<?= htmlspecialchars($rt) ?>" <?= $typeFilter === $rt ? 'selected' : '' ?>>
-              <?= htmlspecialchars($rt) ?>
-            </option>
-            <?php endforeach; ?>
-          </select>
-        </div>
-        <div class="col-md-2">
-          <label class="form-label">Price Range</label>
-          <select class="form-select" name="price_range">
-            <option value="all">All Prices</option>
-            <option value="0-1000" <?= $priceFilter === '0-1000' ? 'selected' : '' ?>>Under ₱1,000</option>
-            <option value="1000-2000" <?= $priceFilter === '1000-2000' ? 'selected' : '' ?>>₱1,000 - ₱2,000</option>
-            <option value="2000-4000" <?= $priceFilter === '2000-4000' ? 'selected' : '' ?>>₱2,000 - ₱4,000</option>
-            <option value="4000-" <?= $priceFilter === '4000-' ? 'selected' : '' ?>>Above ₱4,000</option>
-          </select>
-        </div>
-        <div class="col-md-2">
-          <button type="submit" class="btn-primary-custom w-100 text-center py-2 rounded">
-            <i class="fas fa-search me-1"></i>Check
-          </button>
-        </div>
-      </div>
-    </form>
-    <?php if ($checkIn && $checkOut): ?>
-    <div class="mt-2">
-      <small class="text-success fw-semibold">
-        <i class="fas fa-info-circle me-1"></i>
-        Showing availability for <?= htmlspecialchars($checkIn) ?> to <?= htmlspecialchars($checkOut) ?>
-        — <a href="rooms.php?hotel_id=<?= $hotel_id ?>">Clear dates</a>
-      </small>
-    </div>
-    <?php endif; ?>
-  </div>
-
-  <!-- Section heading -->
-  <div class="row mb-4">
-    <div class="col">
-      <div class="section-title">Available Rooms</div>
-      <div class="gold-line"></div>
-      <p class="section-subtitle"><?= count($rooms) ?> room type<?= count($rooms) !== 1 ? 's' : '' ?> at <?= htmlspecialchars($hotel['hotel_name']) ?></p>
-    </div>
-  </div>
-
-  <?php if (empty($rooms)): ?>
-  <div class="text-center py-5">
-    <div style="font-size:4rem;color:var(--muted);margin-bottom:16px;"><i class="fas fa-door-closed"></i></div>
-    <h4 style="color:var(--muted)">No rooms found</h4>
-    <p class="text-muted">Try adjusting your filters or dates.</p>
-  </div>
-  <?php else: ?>
-  <div class="row g-4">
-    <?php foreach ($rooms as $room): ?>
-    <?php
-    $isBooked = in_array($room['id'], $bookedRoomIds);
-    $isAvailable = ($room['status'] === 'Available') && !$isBooked;
-    ?>
-    <div class="col-lg-4 col-md-6 room-card-wrapper"
-         data-price="<?= $room['price'] ?>"
-         data-type="<?= htmlspecialchars($room['room_type']) ?>">
-      <div class="room-card h-100">
-        <div class="room-img-wrap">
-          <?php
-          $rImgPath = 'uploads/rooms/' . $room['image'];
-          $rShowImg = (file_exists($rImgPath) && $room['image'] !== 'default_room.jpg') ? $rImgPath : null;
-          ?>
-          <?php if ($rShowImg): ?>
-            <img src="<?= htmlspecialchars($rShowImg) ?>" alt="<?= htmlspecialchars($room['room_type']) ?>">
-          <?php else: ?>
-            <div class="img-placeholder" style="height:100%">
-              <i class="fas fa-bed"></i>
-            </div>
+      <div class="admin-card-body">
+        <form method="POST" action="rooms.php" enctype="multipart/form-data">
+          <?php if ($editRoom): ?>
+          <input type="hidden" name="room_id" value="<?= $editRoom['id'] ?>">
+          <input type="hidden" name="existing_image" value="<?= htmlspecialchars($editRoom['image']) ?>">
           <?php endif; ?>
-          <div class="room-status <?= $isAvailable ? 'available' : 'unavailable' ?>">
-            <?php if ($isBooked && $checkIn): ?>
-              <i class="fas fa-ban me-1"></i>Booked
-            <?php elseif ($room['status'] === 'Available'): ?>
-              <i class="fas fa-check me-1"></i>Available
-            <?php else: ?>
-              <i class="fas fa-times me-1"></i>Unavailable
-            <?php endif; ?>
+
+          <div class="mb-3">
+            <label class="form-label">Hotel *</label>
+            <select class="form-select" name="hotel_id" required>
+              <option value="">-- Select Hotel --</option>
+              <?php foreach ($hotels as $h): ?>
+              <option value="<?= $h['id'] ?>"
+                <?= (($editRoom['hotel_id'] ?? $filterHotel) == $h['id']) ? 'selected' : '' ?>>
+                <?= htmlspecialchars($h['hotel_name']) ?>
+              </option>
+              <?php endforeach; ?>
+            </select>
           </div>
-        </div>
-        <div class="room-body d-flex flex-column">
-          <div class="d-flex justify-content-between align-items-start mb-2">
-            <h4 class="room-type"><?= htmlspecialchars($room['room_type']) ?></h4>
-            <div class="room-price">
-              ₱<?= number_format($room['price'], 2) ?>
-              <span>/night</span>
+
+          <div class="mb-3">
+            <label class="form-label">Room Type *</label>
+            <input type="text" class="form-control" name="room_type" required
+              value="<?= htmlspecialchars($editRoom['room_type'] ?? '') ?>"
+              placeholder="e.g. Standard Room, Deluxe Room">
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Price per Night (₱) *</label>
+            <input type="number" class="form-control" name="price" required
+              min="1" step="0.01"
+              value="<?= $editRoom['price'] ?? '' ?>"
+              placeholder="e.g. 1500.00">
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Description</label>
+            <textarea class="form-control" name="description" rows="3"
+              placeholder="Room description..."><?= htmlspecialchars($editRoom['description'] ?? '') ?></textarea>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Status</label>
+            <select class="form-select" name="status">
+              <option value="Available"  <?= (($editRoom['status'] ?? 'Available') === 'Available')   ? 'selected' : '' ?>>Available</option>
+              <option value="Unavailable" <?= (($editRoom['status'] ?? '') === 'Unavailable') ? 'selected' : '' ?>>Unavailable</option>
+            </select>
+          </div>
+
+          <div class="mb-4">
+            <label class="form-label">Room Image</label>
+            <?php if ($editRoom && $editRoom['image'] && $editRoom['image'] !== 'default_room.jpg'): ?>
+            <div class="img-preview-wrap mb-2">
+              <img src="../uploads/rooms/<?= htmlspecialchars($editRoom['image']) ?>"
+                id="roomImgPreview" style="max-height:100px;border-radius:5px;">
             </div>
-          </div>
-          <p class="room-desc"><?= htmlspecialchars($room['description']) ?></p>
-          <div class="mt-auto">
-            <?php if ($isAvailable): ?>
-            <a href="booking.php?room_id=<?= $room['id'] ?><?= $checkIn ? '&check_in='.urlencode($checkIn).'&check_out='.urlencode($checkOut) : '' ?>"
-               class="btn-accent w-100 text-center rounded py-2">
-              <i class="fas fa-calendar-plus me-2"></i>Book Now
-            </a>
             <?php else: ?>
-            <button class="btn w-100 py-2 rounded" disabled
-              style="background:#f1f5f9;color:var(--muted);font-weight:600;cursor:not-allowed;">
-              <i class="fas fa-ban me-2"></i>Not Available
-            </button>
+            <div class="img-preview-wrap mb-2" style="display:none;" id="previewWrapper">
+              <img id="roomImgPreview" style="max-height:100px;">
+            </div>
             <?php endif; ?>
+            <input type="file" class="form-control img-upload-input" name="image"
+              accept="image/*" data-preview="roomImgPreview">
           </div>
-        </div>
+
+          <button type="submit" class="btn-admin-accent w-100 justify-content-center py-2">
+            <i class="fas fa-save me-2"></i><?= $editRoom ? 'Update Room' : 'Add Room' ?>
+          </button>
+        </form>
       </div>
     </div>
-    <?php endforeach; ?>
   </div>
 
-  <div id="noRoomsMsg" style="display:none;" class="text-center py-5">
-    <div style="font-size:3rem;color:var(--muted);margin-bottom:12px;"><i class="fas fa-filter"></i></div>
-    <h5 style="color:var(--muted)">No rooms match your filters</h5>
-    <p class="text-muted">Try different filter options.</p>
+  <!-- ROOMS TABLE -->
+  <div class="col-lg-8">
+    <div class="admin-card">
+      <div class="admin-card-header">
+        <h5><i class="fas fa-bed me-2 text-accent"></i>All Rooms (<?= count($rooms) ?>)</h5>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <form method="GET" style="display:flex;gap:6px;">
+            <select name="hotel_id" class="form-select form-select-sm" style="width:auto;">
+              <option value="">All Hotels</option>
+              <?php foreach ($hotels as $h): ?>
+              <option value="<?= $h['id'] ?>" <?= $filterHotel == $h['id'] ? 'selected' : '' ?>>
+                <?= htmlspecialchars($h['hotel_name']) ?>
+              </option>
+              <?php endforeach; ?>
+            </select>
+            <button type="submit" class="btn btn-sm btn-outline-primary">Filter</button>
+          </form>
+        </div>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>Img</th>
+              <th>Hotel</th>
+              <th>Room Type</th>
+              <th>Price/Night</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php if (empty($rooms)): ?>
+            <tr>
+              <td colspan="6" class="text-center py-4 text-muted">No rooms found.</td>
+            </tr>
+            <?php else: ?>
+            <?php foreach ($rooms as $rm): ?>
+            <tr>
+              <td>
+                <?php
+                $rImg = '../uploads/rooms/' . $rm['image'];
+                $showRImg = (file_exists($rImg) && $rm['image'] !== 'default_room.jpg');
+                ?>
+                <?php if ($showRImg): ?>
+                  <img src="../uploads/rooms/<?= htmlspecialchars($rm['image']) ?>"
+                    style="width:46px;height:34px;object-fit:cover;border-radius:4px;">
+                <?php else: ?>
+                  <div style="width:46px;height:34px;background:linear-gradient(135deg,#e2d9cc,#ccc5bb);border-radius:4px;display:flex;align-items:center;justify-content:center;color:#999;">
+                    <i class="fas fa-bed"></i>
+                  </div>
+                <?php endif; ?>
+              </td>
+              <td style="font-size:0.85rem;"><?= htmlspecialchars($rm['hotel_name']) ?></td>
+              <td style="font-weight:600;"><?= htmlspecialchars($rm['room_type']) ?></td>
+              <td style="color:var(--accent);font-weight:700;">₱<?= number_format($rm['price'], 2) ?></td>
+              <td>
+                <span class="status-badge badge-<?= strtolower($rm['status']) ?>">
+                  <?= $rm['status'] ?>
+                </span>
+              </td>
+              <td>
+                <div style="display:flex;gap:5px;">
+                  <a href="rooms.php?edit=<?= $rm['id'] ?>" class="btn-sm-action btn-edit">
+                    <i class="fas fa-edit"></i>
+                  </a>
+                  <a href="rooms.php?delete=<?= $rm['id'] ?>"
+                     class="btn-sm-action btn-delete btn-confirm-delete">
+                    <i class="fas fa-trash"></i>
+                  </a>
+                </div>
+              </td>
+            </tr>
+            <?php endforeach; ?>
+            <?php endif; ?>
+          </tbody>
+        </table>
+      </div>
+    </div>
   </div>
-  <?php endif; ?>
 
 </div>
 
-<?php require_once 'includes/footer.php'; ?>
+<?php require_once 'admin_footer.php'; ?>
